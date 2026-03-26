@@ -1,0 +1,21 @@
+#!/bin/sh
+# Bring down a single pipeline (without removing it).
+# Usage: stop-pipeline <name>
+
+BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+NAME="$1"
+
+if [ -z "$NAME" ]; then
+    echo "Usage: stop-pipeline <name>" >&2
+    exit 1
+fi
+
+SVC="$BASE_DIR/services/$NAME"
+if [ ! -d "$SVC" ]; then
+    echo "No service dir for '$NAME' — run bin/sync first." >&2
+    exit 1
+fi
+
+echo "[$NAME] Stopping..."
+s6-svc -d "$SVC"
+echo "[$NAME] Stopped. Restart with: bin/start-pipeline $NAME"

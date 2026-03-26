@@ -1,0 +1,31 @@
+#!/bin/sh
+# Show status of all supervised pipeline services.
+
+BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SERVICES_DIR="$BASE_DIR/services"
+
+if [ ! -d "$SERVICES_DIR" ] || [ -z "$(ls -A "$SERVICES_DIR" 2>/dev/null)" ]; then
+    echo "No services found in $SERVICES_DIR"
+    echo "Run: bin/start"
+    exit 0
+fi
+
+echo "Pipeline services:"
+echo "─────────────────────────────────────────────────────"
+printf "%-20s  %-10s  %s\n" "NAME" "STATE" "PID / UPTIME"
+echo "─────────────────────────────────────────────────────"
+
+for svc in "$SERVICES_DIR"/*/; do
+    [ -d "$svc" ] || continue
+    name="$(basename "$svc")"
+    info="$(s6-svstat "$svc" 2>/dev/null)" || { printf "%-20s  %-10s\n" "$name" "no-svscan"; continue; }
+
+    # s6-svstat output: "up (pid NNNN) NNNs; ready NNNs"
+    #               or: "down (NNNs);"
+    state="$(echo "$info" | awk '{print $1}')"
+    rest="$(echo "$info" | cut -d' ' -f2-)"
+    printf "%-20s  %-10s  %s\n" "$name" "$state" "$rest"
+done
+
+echo ""
+echo "Log dirs: $BASE_DIR/logs/<name>/current"

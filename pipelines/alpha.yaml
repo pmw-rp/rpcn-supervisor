@@ -1,0 +1,13 @@
+input:
+  generate:
+    mapping: |
+      root.pipeline = "alpha"
+      root.id = uuid_v4()
+      root.value = random_int(min: 1000, max: 9999)
+      root.ts = now()
+    interval: 2s
+    count: 0
+
+output:
+  stdout:
+    codec: lines

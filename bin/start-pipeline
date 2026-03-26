@@ -1,0 +1,44 @@
+#!/bin/sh
+# Bring up one or all pipelines under the running s6-svscan.
+# Usage: bin/start-pipeline <name>
+#        bin/start-pipeline --all
+#
+# If the service dir doesn't exist yet (e.g. a brand-new config), creates it
+# first via make-service. If it exists but is down, signals s6-supervise to
+# start it. Either way s6-svscan must already be running (bin/start-all).
+
+BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+NAME="$1"
+
+if [ -z "$NAME" ]; then
+    echo "Usage: bin/start-pipeline <name|--all>" >&2
+    exit 1
+fi
+
+start_one() {
+    local name="$1"
+    local svc="$BASE_DIR/services/$name"
+    if [ ! -d "$svc" ]; then
+        config="$BASE_DIR/pipelines/$name.yaml"
+        if [ ! -f "$config" ]; then
+            echo "[$name] No config found at $config" >&2
+            return 1
+        fi
+        echo "[$name] Creating service dir..."
+        "$BASE_DIR/bin/internal/make-service" "$name" "$config"
+        echo "[$name] Service registered — s6-svscan will start it shortly."
+    else
+        echo "[$name] Starting..."
+        s6-svc -u "$svc"
+        echo "[$name] Started."
+    fi
+}
+
+if [ "$NAME" = "--all" ]; then
+    for config in "$BASE_DIR/pipelines"/*.yaml; do
+        [ -f "$config" ] || continue
+        start_one "$(basename "$config" .yaml)"
+    done
+else
+    start_one "$NAME"
+fi

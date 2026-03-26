@@ -1,0 +1,14 @@
+input:
+  generate:
+    mapping: |
+      let words = ["foo", "bar", "baz", "qux", "quux"]
+      root.pipeline = "gamma"
+      root.word = $words.index(random_int(min: 0, max: 4))
+      root.count = random_int(min: 1, max: 100)
+      root.ts = now()
+    interval: 5s
+    count: 0
+
+output:
+  stdout:
+    codec: lines

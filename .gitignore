@@ -1,0 +1,11 @@
+# Runtime-generated service dirs (rebuilt by bin/sync-services)
+services/
+
+# Logs
+logs/
+
+# Secrets
+.env
+
+# macOS
+.DS_Store

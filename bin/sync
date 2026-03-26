@@ -1,0 +1,48 @@
+#!/bin/sh
+# Sync s6 service dirs to match the set of *.yaml files in pipelines/.
+# - New config  → create service dir + notify s6-svscan
+# - Removed config → bring service down + remove service dir
+# Run once manually or from a file-watcher loop.
+
+set -e
+BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PIPELINES_DIR="$BASE_DIR/pipelines"
+SERVICES_DIR="$BASE_DIR/services"
+SCAN_DIR="$SERVICES_DIR"
+
+# --- Add services for new configs ---
+for config in "$PIPELINES_DIR"/*.yaml; do
+    [ -e "$config" ] || continue
+    name="$(basename "$config" .yaml)"
+    svc="$SERVICES_DIR/$name"
+    if [ ! -d "$svc" ]; then
+        echo "[sync] Creating service: $name"
+        "$BASE_DIR/bin/internal/make-service" "$name" "$config"
+        # If svscan is running, it will auto-detect the new directory.
+    fi
+done
+
+# --- Remove services for deleted configs ---
+for svc in "$SERVICES_DIR"/*/; do
+    [ -d "$svc" ] || continue
+    name="$(basename "$svc")"
+    # Skip health-check services — they are managed by make-service and
+    # are removed automatically when their parent pipeline is removed.
+    case "$name" in *-health) continue ;; esac
+    config="$PIPELINES_DIR/$name.yaml"
+    if [ ! -f "$config" ]; then
+        echo "[sync] Removing service: $name"
+        # Stop the health-check companion first if it exists
+        health_svc="$SERVICES_DIR/${name}-health"
+        if [ -d "$health_svc" ]; then
+            s6-svc -wD -T 5000 -d "$health_svc" 2>/dev/null || true
+            rm -rf "$health_svc"
+        fi
+        # Signal s6-supervise to stop the service before removing
+        s6-svc -wD -T 5000 -d "$svc" 2>/dev/null || true
+        rm -rf "$svc"
+        echo "[sync] Removed: $svc"
+    fi
+done
+
+echo "[sync] Done."

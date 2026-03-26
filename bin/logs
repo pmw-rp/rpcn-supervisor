@@ -1,0 +1,37 @@
+#!/bin/sh
+# Tail logs for one or all pipelines, with human-readable timestamps.
+# Usage: bin/logs [<name>]
+
+BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+S6TAI="$(command -v s6-tai64nlocal 2>/dev/null)"
+
+decode() {
+    if [ -n "$S6TAI" ]; then
+        "$S6TAI"
+    else
+        cat
+    fi
+}
+
+if [ -n "$1" ]; then
+    log="$BASE_DIR/logs/$1/current"
+    if [ ! -f "$log" ]; then
+        echo "No log found for '$1' (expected: $log)" >&2
+        exit 1
+    fi
+    tail -f "$log" | decode
+else
+    if [ ! -d "$BASE_DIR/logs" ] || [ -z "$(ls -A "$BASE_DIR/logs" 2>/dev/null)" ]; then
+        echo "No logs found. Have any pipelines run yet?" >&2
+        exit 1
+    fi
+    # Spawn a separate tail per pipeline so each line can be labelled
+    # immediately without waiting for tail's multi-file ==> headers.
+    for log in "$BASE_DIR/logs"/*/current; do
+        [ -f "$log" ] || continue
+        name="$(basename "$(dirname "$log")")"
+        tail -f "$log" | decode | awk -v name="$name" '{ print name ": " $0; fflush() }' &
+    done
+    trap 'kill 0' INT TERM
+    wait
+fi

@@ -1,0 +1,202 @@
+#!/bin/sh
+# Create s6 service dir(s) for a given pipeline config.
+# Usage: make-service <pipeline-name> <config-path>
+#
+# If pipelines/ports contains a port for this pipeline, also creates a
+# companion health-check service (<name>-health) that polls /ready and
+# restarts the pipeline on sustained failures.
+set -e
+
+NAME="$1"
+CONFIG="$2"
+BASE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+SVC_DIR="$BASE_DIR/services/$NAME"
+LOG_DIR="$BASE_DIR/logs/$NAME"
+PORTS_FILE="$BASE_DIR/pipelines/ports"
+
+if [ -z "$NAME" ] || [ -z "$CONFIG" ]; then
+    echo "Usage: make-service <name> <config-path>" >&2
+    exit 1
+fi
+
+# Resolve absolute paths at creation time so the generated run scripts
+# work correctly even when s6-supervise starts them with a minimal $PATH.
+RPK="$(command -v rpk)" || { echo "rpk not found in PATH" >&2; exit 1; }
+S6LOG="$(command -v s6-log)" || { echo "s6-log not found in PATH" >&2; exit 1; }
+S6SVC="$(command -v s6-svc)" || { echo "s6-svc not found in PATH" >&2; exit 1; }
+STDBUF="$(command -v stdbuf 2>/dev/null)"
+
+# Look up or auto-assign a port for this pipeline.
+# Ports are recorded in pipelines/ports so assignments are stable across
+# regenerations. If this pipeline has no entry, allocate the next free port
+# starting from 4195 (Redpanda Connect's default) and persist it.
+BASE_PORT=4195
+PORT=""
+if [ -f "$PORTS_FILE" ]; then
+    PORT="$(grep "^${NAME}=" "$PORTS_FILE" | cut -d= -f2 | tr -d '[:space:]')"
+fi
+if [ -z "$PORT" ]; then
+    # Find the highest currently assigned port and add 1, or use BASE_PORT.
+    # Read only complete lines (grep -v empty) to avoid partial-write races.
+    max=""
+    if [ -f "$PORTS_FILE" ]; then
+        max="$(grep -v '^#' "$PORTS_FILE" | grep '^[^=]*=[0-9][0-9]*$' | cut -d= -f2 | sort -n | tail -1)"
+    fi
+    if [ -n "$max" ]; then
+        PORT=$(( max + 1 ))
+    else
+        PORT=$BASE_PORT
+    fi
+    printf '%s=%s\n' "$NAME" "$PORT" >> "$PORTS_FILE"
+    echo "[$NAME] Assigned port ${PORT}"
+fi
+
+mkdir -p "$SVC_DIR/log"
+mkdir -p "$LOG_DIR"
+
+# --- Pipeline run script ---
+# Implements crash loop backoff matching Kubernetes CrashLoopBackOff timings:
+#   attempts : 1   2   3   4    5    6+
+#   delay(s) : 0  10  20  40   80  160  300  (doubles each time, capped at 300s)
+# The crash counter resets after the process stays up for 10 minutes.
+cat > "$SVC_DIR/run" <<'RUNEOF'
+#!/bin/sh
+STATE_DIR="$(dirname "$0")/state"
+COUNTER_FILE="$STATE_DIR/crash_count"
+LAST_START_FILE="$STATE_DIR/last_start"
+RESET_AFTER=600   # seconds of uptime before counter resets (10 min, same as k8s)
+MAX_DELAY=300     # cap backoff at 5 minutes
+
+mkdir -p "$STATE_DIR"
+
+# Reset counter if the previous run was healthy (stayed up >= RESET_AFTER seconds)
+if [ -f "$LAST_START_FILE" ]; then
+    last_start="$(cat "$LAST_START_FILE")"
+    now="$(date +%s)"
+    uptime=$(( now - last_start ))
+    if [ "$uptime" -ge "$RESET_AFTER" ]; then
+        rm -f "$COUNTER_FILE"
+    fi
+fi
+
+# Read and increment crash counter
+count=0
+if [ -f "$COUNTER_FILE" ]; then
+    count="$(cat "$COUNTER_FILE")"
+fi
+
+# Apply backoff delay before starting (no delay on first attempt)
+if [ "$count" -gt 0 ]; then
+    delay=10
+    i=1
+    while [ "$i" -lt "$count" ]; do
+        delay=$(( delay * 2 ))
+        [ "$delay" -gt "$MAX_DELAY" ] && delay="$MAX_DELAY"
+        i=$(( i + 1 ))
+    done
+    echo "[backoff] crash #${count} — waiting ${delay}s before restart" >&2
+    sleep "$delay"
+fi
+
+# Record start time and incremented crash count for the next potential restart
+date +%s > "$LAST_START_FILE"
+echo $(( count + 1 )) > "$COUNTER_FILE"
+
+RUNEOF
+
+# Append the exec line — include HTTP server flag if a port is assigned
+if [ -n "$PORT" ]; then
+    cat >> "$SVC_DIR/run" <<EOF
+exec ${RPK} connect run --set http.enabled=true --set http.address=0.0.0.0:${PORT} ${CONFIG} 2>&1
+EOF
+else
+    cat >> "$SVC_DIR/run" <<EOF
+exec ${RPK} connect run ${CONFIG} 2>&1
+EOF
+fi
+chmod +x "$SVC_DIR/run"
+
+# --- Pipeline log script ---
+cat > "$SVC_DIR/log/run" <<EOF
+#!/bin/sh
+exec ${S6LOG} T n20 s1000000 ${LOG_DIR}
+EOF
+chmod +x "$SVC_DIR/log/run"
+
+echo "Service created: $SVC_DIR"
+
+# --- Health-check service (only when a port is assigned) ---
+if [ -z "$PORT" ]; then
+    exit 0
+fi
+
+HEALTH_SVC_DIR="$BASE_DIR/services/${NAME}-health"
+HEALTH_LOG_DIR="$BASE_DIR/logs/${NAME}-health"
+mkdir -p "$HEALTH_SVC_DIR/log"
+mkdir -p "$HEALTH_LOG_DIR"
+
+cat > "$HEALTH_SVC_DIR/run" <<EOF
+#!/bin/sh
+# Health-check for pipeline: ${NAME}
+# Mirrors k8s readiness probe behaviour:
+#   - polls /ready every 10s (periodSeconds)
+#   - 3 consecutive failures  → restart the pipeline (failureThreshold)
+#   - 1 success after failure → clear the failure counter (successThreshold)
+#   - 5s curl timeout         (timeoutSeconds)
+#   - waits 15s before first check to allow startup (initialDelaySeconds)
+
+PIPELINE_SVC="${SVC_DIR}"
+READY_URL="http://127.0.0.1:${PORT}/ready"
+PERIOD=10
+FAILURE_THRESHOLD=3
+TIMEOUT=5
+INITIAL_DELAY=15
+
+failures=0
+
+echo "[health:${NAME}] Starting — waiting \${INITIAL_DELAY}s for pipeline to initialise"
+sleep "\$INITIAL_DELAY"
+
+while true; do
+    # If the pipeline was intentionally stopped (s6-svc -d), stand down —
+    # do not probe and do not restart. Resume checking once it's wanted up again.
+    wanted="\$(${S6SVC%svc}svstat -o wantedup "\$PIPELINE_SVC" 2>/dev/null)"
+    if [ "\$wanted" != "true" ]; then
+        if [ "\$failures" -gt 0 ]; then
+            echo "[health:${NAME}] Pipeline is administratively down — clearing failure count"
+            failures=0
+        fi
+        sleep "\$PERIOD"
+        continue
+    fi
+
+    status="\$(curl -s -o /dev/null -w '%{http_code}' --max-time \$TIMEOUT "\$READY_URL" 2>/dev/null)"
+    if [ "\$status" = "200" ]; then
+        if [ "\$failures" -gt 0 ]; then
+            echo "[health:${NAME}] Recovered (was \${failures} failures)"
+            failures=0
+        fi
+    else
+        failures=\$(( failures + 1 ))
+        echo "[health:${NAME}] Not ready (HTTP \${status:-timeout}) — failure \${failures}/\${FAILURE_THRESHOLD}"
+        if [ "\$failures" -ge "\$FAILURE_THRESHOLD" ]; then
+            echo "[health:${NAME}] Failure threshold reached — restarting pipeline"
+            ${S6SVC} -r "\$PIPELINE_SVC"
+            failures=0
+            # Give the pipeline time to come back before probing again;
+            # the pipeline's own backoff adds additional delay on top of this.
+            sleep "\$INITIAL_DELAY"
+        fi
+    fi
+    sleep "\$PERIOD"
+done
+EOF
+chmod +x "$HEALTH_SVC_DIR/run"
+
+cat > "$HEALTH_SVC_DIR/log/run" <<EOF
+#!/bin/sh
+exec ${S6LOG} T n20 s1000000 ${HEALTH_LOG_DIR}
+EOF
+chmod +x "$HEALTH_SVC_DIR/log/run"
+
+echo "Health-check service created: $HEALTH_SVC_DIR (port ${PORT})"

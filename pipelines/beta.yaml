@@ -1,0 +1,13 @@
+input:
+  generate:
+    mapping: |
+      root.pipeline = "beta"
+      root.id = uuid_v4()
+      root.payload = "msg-" + random_int(min: 100000, max: 999999).string()
+      root.ts = now()
+    interval: 3s
+    count: 0
+
+output:
+  stdout:
+    codec: lines
