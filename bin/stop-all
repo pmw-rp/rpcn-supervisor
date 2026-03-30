@@ -2,7 +2,7 @@
 # Stop all pipelines cleanly, then stop s6-svscan.
 
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SERVICES_DIR="$BASE_DIR/services"
+SERVICES_DIR="$BASE_DIR/internal/services"
 PID_FILE="$SERVICES_DIR/.svscan.pid"
 
 # Check svscan is actually running before attempting anything
@@ -12,24 +12,33 @@ if ! s6-svscanctl -n "$SERVICES_DIR" 2>/dev/null; then
     exit 1
 fi
 
-# Stop each supervised pipeline first so they shut down cleanly
-for svc in "$SERVICES_DIR"/*/; do
+# Stop all supervised services cleanly before tearing down the supervisor tree.
+# Health checks and sync-watcher must be stopped first to avoid log supervisor
+# warnings when internal-svscan shuts down mid-write.
+INTERNAL_RUN_DIR="$BASE_DIR/internal/internal-run"
+for svc in "$INTERNAL_RUN_DIR"/*/; do
+    [ -d "$svc" ] || continue
+    s6-svc -wD -T 5000 -d "$svc" 2>/dev/null || true
+done
+
+PIPELINES_RUN_DIR="$BASE_DIR/internal/pipelines-run"
+for svc in "$PIPELINES_RUN_DIR"/*/; do
     [ -d "$svc" ] || continue
     name="$(basename "$svc")"
     echo "[$name] Stopping..."
     s6-svc -wD -T 5000 -d "$svc" 2>/dev/null || true
 done
 
-# Tell svscan to exit via its control pipe and wait for it to fully exit
+# Stop the root svscan — this cascades to sub-svscans and all internal services
 echo "[stop-all] Stopping s6-svscan..."
 s6-svscanctl -t "$SERVICES_DIR"
 
-# Wait up to 10s for svscan to exit (it waits for s6-supervise children to die)
+# Wait up to 20s for the cascade: root → sub-svscans → supervised processes
 i=0
 while s6-svscanctl -n "$SERVICES_DIR" 2>/dev/null; do
     i=$(( i + 1 ))
-    if [ "$i" -ge 10 ]; then
-        echo "[stop-all] Warning: s6-svscan did not exit within 10s" >&2
+    if [ "$i" -ge 20 ]; then
+        echo "[stop-all] Warning: s6-svscan did not exit within 20s" >&2
         break
     fi
     sleep 1

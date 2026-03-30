@@ -4,7 +4,8 @@
 
 set -e
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SERVICES_DIR="$BASE_DIR/services"
+INTERNAL_DIR="$BASE_DIR/internal"
+SERVICES_DIR="$INTERNAL_DIR/services"
 PID_FILE="$SERVICES_DIR/.svscan.pid"
 
 # Use s6-svscanctl as the authoritative liveness check — it talks to the
@@ -14,11 +15,22 @@ if s6-svscanctl -n "$SERVICES_DIR" 2>/dev/null; then
     exit 1
 fi
 
+# Ensure run dirs exist before the sub-svscans try to watch them
+mkdir -p "$INTERNAL_DIR/pipelines-run" "$INTERNAL_DIR/internal-run"
+
+# Populate services/ from the static sub-svscan wrappers in etc/services/.
+mkdir -p "$SERVICES_DIR"
+cp -rn "$INTERNAL_DIR/etc/services/." "$SERVICES_DIR/" || true
+
+# Populate internal-run/ with static internal service definitions (e.g. sync-watcher).
+cp -rn "$INTERNAL_DIR/etc/internal/." "$INTERNAL_DIR/internal-run/" || true
+
 echo "[start-all] Syncing pipelines → services..."
 "$BASE_DIR/bin/sync"
 
 echo "[start-all] Starting s6-svscan..."
 s6-svscan "$SERVICES_DIR" &
+
 echo $! > "$PID_FILE"
 
 echo "[start-all] Started (pid $(cat "$PID_FILE")). Stop with: bin/stop-all"

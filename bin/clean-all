@@ -1,0 +1,21 @@
+#!/bin/sh
+# Remove all runtime data, returning the system to a clean initial state.
+# Run this after bin/stop-all.
+
+BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SERVICES_DIR="$BASE_DIR/internal/services"
+
+# Refuse to run while svscan is still up
+if s6-svscanctl -n "$SERVICES_DIR" 2>/dev/null; then
+    echo "[clean-all] s6-svscan is still running — run bin/stop-all first." >&2
+    exit 1
+fi
+
+echo "[clean-all] Removing runtime dirs..."
+rm -rf \
+    "$BASE_DIR/internal/services" \
+    "$BASE_DIR/internal/pipelines-run" \
+    "$BASE_DIR/internal/internal-run" \
+    "$BASE_DIR/internal/logs"
+
+echo "[clean-all] Done. Run bin/start-all to start fresh."

@@ -28,21 +28,30 @@ apk add s6
 
 ```
 rpcn-supervisor/
-├── pipelines/          ← source of truth: one .yaml per pipeline
-├── services/           ← s6 service dirs (generated, do not edit)
-├── logs/
-│   └── <name>/
-│       └── current     ← active log file (rotated automatically)
-└── bin/
-    ├── start-all       ← sync + launch s6-svscan (foreground)
-    ├── stop-all        ← stop all pipelines (svscan keeps running)
-    ├── start-pipeline  ← start or register a single pipeline
-    ├── stop-pipeline   ← stop a single pipeline
-    ├── status          ← show all pipeline states and PIDs
-    ├── logs            ← tail logs for one or all pipelines
-    ├── sync            ← reconcile services/ from pipelines/
-    └── internal/
-        └── make-service    ← create one s6 service dir (called by sync)
+├── bin/
+│   ├── start-all       ← sync + launch root s6-svscan (background)
+│   ├── stop-all        ← stop all pipelines then stop s6-svscan
+│   ├── start-pipeline  ← start or register a single pipeline
+│   ├── stop-pipeline   ← stop a single pipeline
+│   ├── status          ← show pipeline states and PIDs
+│   ├── logs            ← tail logs for one or all pipelines
+│   ├── sync            ← reconcile internal/pipelines-run/ from pipelines/ (also runs every 5s)
+│   └── internal/
+│       └── make-service    ← create pipeline + health-check service dirs
+├── pipelines/              ← source of truth: one .yaml per pipeline
+└── internal/               ← all runtime and config internals (gitignored except etc/)
+    ├── etc/
+    │   ├── services/       ← static root svscan service definitions (committed)
+    │   │   ├── pipelines-svscan/   ← supervises internal/pipelines-run/
+    │   │   └── internal-svscan/    ← supervises internal/internal-run/
+    │   └── internal/       ← static internal service definitions (committed)
+    │       └── sync-watcher/       ← polls bin/sync every 5s
+    ├── services/           ← runtime: populated from etc/services/ by start-all
+    ├── pipelines-run/      ← runtime: generated pipeline service dirs
+    ├── internal-run/       ← runtime: generated health-check dirs + sync-watcher
+    └── logs/
+        ├── pipelines/<name>/current   ← pipeline output logs
+        └── internal/                  ← health-check and sync-watcher logs
 ```
 
 ---
@@ -66,25 +75,26 @@ bin/status
 
 ### Add a pipeline
 
-Drop a Redpanda Connect YAML config into `pipelines/` and run `sync`:
+Drop a Redpanda Connect YAML config into `pipelines/`:
 
 ```bash
 cp my-pipeline.yaml pipelines/my-pipeline.yaml
-bin/sync
 ```
 
-`sync` creates the s6 service dir. If `s6-svscan` is already running it will
-detect the new directory within a few seconds and start the pipeline automatically.
+The `sync-watcher` service picks it up automatically within 5 seconds. To
+register it immediately:
+
+```bash
+bin/sync
+```
 
 ### Remove a pipeline
 
 ```bash
 rm pipelines/my-pipeline.yaml
-bin/sync
 ```
 
-`sync` signals s6-supervise to stop the process (waiting up to 5 seconds for a
-clean exit) and then removes the service dir.
+Again, auto-removed within 5 seconds, or immediately with `bin/sync`.
 
 ### Stop and start individual pipelines
 
@@ -122,7 +132,7 @@ bin/logs
 
 Timestamps are decoded from s6's TAI64N format to local time automatically if
 `s6-tai64nlocal` is available (it is included with the `s6` package). Raw logs are
-in `logs/<name>/current` and rotate automatically (up to 20 files, 1 MB each).
+in `internal/logs/pipelines/<name>/current` and rotate automatically (up to 20 files, 1 MB each).
 
 ---
 
@@ -131,40 +141,41 @@ in `logs/<name>/current` and rotate automatically (up to 20 files, 1 MB each).
 ```
 pipelines/*.yaml
        │
-       ▼
-bin/sync          ← reconciles filesystem, idempotent
+       ▼  (every 5s via sync-watcher, or manually via bin/sync)
+bin/sync  ← reconciler: diffs pipelines/ against internal/pipelines-run/, idempotent
        │
-       ├── bin/internal/make-service alpha pipelines/alpha.yaml
-       │       └── services/alpha/run        exec rpk connect run ...
-       │           services/alpha/log/run    exec s6-log ...
-       │
-       └── (remove) s6-svc -d services/old → rm -rf services/old
-                │
-                ▼
-          s6-svscan services/
-          ├── s6-supervise alpha  →  rpk connect run alpha.yaml
-          │       └── s6-supervise alpha/log  →  s6-log → logs/alpha/
-          ├── s6-supervise beta   →  rpk connect run beta.yaml
-          │       └── s6-supervise beta/log   →  s6-log → logs/beta/
-          └── ...
+       ├── make-service alpha   → internal/pipelines-run/alpha/        (pipeline)
+       │                          internal/internal-run/alpha-health/  (health-check)
+       └── (remove) s6-svc -d  → rm -rf internal/pipelines-run/old/
+
+s6-svscan internal/services/              ← root supervisor
+├── s6-supervise pipelines-svscan  →  s6-svscan internal/pipelines-run/
+│       ├── s6-supervise alpha     →  rpk connect run alpha.yaml
+│       ├── s6-supervise beta      →  rpk connect run beta.yaml
+│       └── s6-supervise gamma     →  rpk connect run gamma.yaml
+└── s6-supervise internal-svscan  →  s6-svscan internal/internal-run/
+        ├── s6-supervise alpha-health  →  polls /ready, restarts on failure
+        ├── s6-supervise beta-health
+        ├── s6-supervise gamma-health
+        └── s6-supervise sync-watcher  →  sleep 5; bin/sync; loop
 ```
 
-**`bin/sync`** is a reconciler. It diffs `pipelines/` against `services/` and
-creates or removes service dirs to match. It is idempotent and safe to run at any time.
+**`bin/sync`** diffs `pipelines/` against `internal/pipelines-run/` and creates or
+removes service dirs to match. It is idempotent and safe to run at any time. It
+also signals the sub-svscans to rescan immediately after any change.
 
-**`bin/make-service`** resolves the absolute paths to `rpk` and `s6-log` from `$PATH` at
-creation time and bakes them into the generated `run` scripts. This means the scripts are
-portable across platforms (macOS Homebrew, Linux system packages, custom installs) without
-any code changes — the resolution happens once, when you run `sync` or
-`make-service` directly.
+**`bin/internal/make-service`** resolves the absolute paths to `rpk` and `s6-log` from
+`$PATH` at creation time and bakes them into the generated `run` scripts. This means the
+scripts are portable across platforms (macOS Homebrew, Linux system packages, custom
+installs) without any code changes — the resolution happens once, when you run `sync`.
 
-**HTTP ports** are auto-assigned and persisted in `pipelines/ports`. Each pipeline gets a
+**HTTP ports** are auto-assigned and persisted in `internal/ports`. Each pipeline gets a
 unique port starting from 4195 (Redpanda Connect's default), incrementing by 1 for each
 new pipeline. The port is injected at runtime via `--set http.enabled=true --set
 http.address=0.0.0.0:<port>` — the pipeline YAML files are not modified. Assignments are
-stable: once written to `pipelines/ports` the same port is reused on every `sync`
-run. To reassign a port, remove the line from `pipelines/ports`, delete the service dir,
-and run `bin/sync`.
+stable: once written to `internal/ports` the same port is reused on every `sync`
+run. To reassign a port, remove the line from `internal/ports`, delete the service dir
+from `internal/pipelines-run/`, and run `bin/sync`.
 
 **`s6-svscan`** scans its directory every 5 seconds. Any subdirectory containing an
 executable `run` script is treated as a service. It spawns a dedicated `s6-supervise`
@@ -199,7 +210,7 @@ input:
 ```
 
 To pass the env file through to `rpk connect`, update the `run` script line in
-`bin/make-service`:
+`bin/internal/make-service`:
 
 ```sh
 exec ${RPK} connect run --env-file ${BASE_DIR}/.env ${CONFIG} 2>&1
@@ -246,16 +257,14 @@ age keys.
 | `pipelines/beta.yaml` | Generates a UUID + random string payload every 3s |
 | `pipelines/gamma.yaml` | Picks a random word from a fixed list every 5s |
 
-All three write JSON lines to stdout, which s6-log captures into `logs/<name>/current`.
+All three write JSON lines to stdout, which s6-log captures into `internal/logs/pipelines/<name>/current`.
 
 ---
 
 ## Limitations
 
-**Manual sync required at runtime.** `s6-svscan` detects new service directories
-automatically, but `bin/sync` must be called to *create* those directories from
-new config files. There is no inotify/FSEvents watcher — adding a config while the
-supervisor is running requires a manual `bin/sync` call.
+**Sync latency.** Pipeline configs are picked up automatically by the `sync-watcher`
+service every 5 seconds. For immediate registration, run `bin/sync` manually.
 
 **One process per pipeline.** Each pipeline is a single `rpk connect` process. There is
 no horizontal scaling or work distribution. For high-throughput pipelines you would need
@@ -267,13 +276,9 @@ another being ready first, nothing here enforces that ordering.
 **Crash loop backoff.** Each pipeline's `run` script implements exponential backoff
 matching Kubernetes CrashLoopBackOff timings (10s → 20s → 40s → 80s → 160s → 300s cap).
 The counter resets after 10 minutes of clean uptime. State is stored in
-`services/<name>/state/`. To manually clear the backoff for a pipeline:
+`internal/pipelines-run/<name>/state/`. To manually clear the backoff for a pipeline:
 
 ```bash
-rm services/my-pipeline/state/crash_count
-s6-svc -u services/my-pipeline
+rm internal/pipelines-run/my-pipeline/state/crash_count
+s6-svc -u internal/pipelines-run/my-pipeline
 ```
-
-**Foreground only.** `bin/start` runs `s6-svscan` in the foreground. For a background
-daemon, wrap it in a system service (launchd on macOS, systemd on Linux) or run it inside
-a terminal multiplexer.

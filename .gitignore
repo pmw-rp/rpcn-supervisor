@@ -1,8 +1,10 @@
-# Runtime-generated service dirs (rebuilt by bin/sync-services)
-services/
+# Runtime-generated dirs (populated by bin/start-all and bin/sync)
+internal/services/
+internal/pipelines-run/
+internal/internal-run/
 
 # Logs
-logs/
+internal/logs/
 
 # Secrets
 .env

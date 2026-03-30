@@ -1,0 +1,4 @@
+#!/bin/sh
+BASE_DIR="$(cd "$(dirname "$0")/../../../.." && pwd)"
+mkdir -p "$BASE_DIR/internal/logs/internal/sync-watcher"
+exec s6-log T n20 s1000000 "$BASE_DIR/internal/logs/internal/sync-watcher"

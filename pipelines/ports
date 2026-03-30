@@ -1,8 +1,0 @@
-# Pipeline HTTP port assignments — managed automatically by bin/make-service.
-# Each entry maps a pipeline name to its Redpanda Connect HTTP server port.
-# Do not edit port numbers that are already in use; they are baked into the
-# generated service dirs. To reassign a port, remove the line, delete the
-# service dir, and run bin/sync-services.
-alpha=4195
-beta=4196
-gamma=4197

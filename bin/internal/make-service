@@ -2,7 +2,7 @@
 # Create s6 service dir(s) for a given pipeline config.
 # Usage: make-service <pipeline-name> <config-path>
 #
-# If pipelines/ports contains a port for this pipeline, also creates a
+# If internal/ports contains a port for this pipeline, also creates a
 # companion health-check service (<name>-health) that polls /ready and
 # restarts the pipeline on sustained failures.
 set -e
@@ -10,9 +10,9 @@ set -e
 NAME="$1"
 CONFIG="$2"
 BASE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-SVC_DIR="$BASE_DIR/services/$NAME"
-LOG_DIR="$BASE_DIR/logs/$NAME"
-PORTS_FILE="$BASE_DIR/pipelines/ports"
+SVC_DIR="$BASE_DIR/internal/pipelines-run/$NAME"
+LOG_DIR="$BASE_DIR/internal/logs/pipelines/$NAME"
+PORTS_FILE="$BASE_DIR/internal/ports"
 
 if [ -z "$NAME" ] || [ -z "$CONFIG" ]; then
     echo "Usage: make-service <name> <config-path>" >&2
@@ -27,7 +27,7 @@ S6SVC="$(command -v s6-svc)" || { echo "s6-svc not found in PATH" >&2; exit 1; }
 STDBUF="$(command -v stdbuf 2>/dev/null)"
 
 # Look up or auto-assign a port for this pipeline.
-# Ports are recorded in pipelines/ports so assignments are stable across
+# Ports are recorded in internal/ports so assignments are stable across
 # regenerations. If this pipeline has no entry, allocate the next free port
 # starting from 4195 (Redpanda Connect's default) and persist it.
 BASE_PORT=4195
@@ -130,8 +130,8 @@ if [ -z "$PORT" ]; then
     exit 0
 fi
 
-HEALTH_SVC_DIR="$BASE_DIR/services/${NAME}-health"
-HEALTH_LOG_DIR="$BASE_DIR/logs/${NAME}-health"
+HEALTH_SVC_DIR="$BASE_DIR/internal/internal-run/${NAME}-health"
+HEALTH_LOG_DIR="$BASE_DIR/internal/logs/internal/${NAME}-health"
 mkdir -p "$HEALTH_SVC_DIR/log"
 mkdir -p "$HEALTH_LOG_DIR"
 

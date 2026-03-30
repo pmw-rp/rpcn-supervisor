@@ -10,7 +10,7 @@ if [ -z "$NAME" ]; then
     exit 1
 fi
 
-SVC="$BASE_DIR/services/$NAME"
+SVC="$BASE_DIR/internal/pipelines-run/$NAME"
 if [ ! -d "$SVC" ]; then
     echo "No service dir for '$NAME' — run bin/sync first." >&2
     exit 1

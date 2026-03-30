@@ -17,7 +17,7 @@ fi
 
 start_one() {
     local name="$1"
-    local svc="$BASE_DIR/services/$name"
+    local svc="$BASE_DIR/internal/pipelines-run/$name"
     if [ ! -d "$svc" ]; then
         config="$BASE_DIR/pipelines/$name.yaml"
         if [ ! -f "$config" ]; then

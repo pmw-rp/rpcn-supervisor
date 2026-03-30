@@ -14,20 +14,18 @@ decode() {
 }
 
 if [ -n "$1" ]; then
-    log="$BASE_DIR/logs/$1/current"
+    log="$BASE_DIR/internal/logs/pipelines/$1/current"
     if [ ! -f "$log" ]; then
         echo "No log found for '$1' (expected: $log)" >&2
         exit 1
     fi
     tail -f "$log" | decode
 else
-    if [ ! -d "$BASE_DIR/logs" ] || [ -z "$(ls -A "$BASE_DIR/logs" 2>/dev/null)" ]; then
+    if [ ! -d "$BASE_DIR/internal/logs/pipelines" ] || [ -z "$(ls -A "$BASE_DIR/internal/logs/pipelines" 2>/dev/null)" ]; then
         echo "No logs found. Have any pipelines run yet?" >&2
         exit 1
     fi
-    # Spawn a separate tail per pipeline so each line can be labelled
-    # immediately without waiting for tail's multi-file ==> headers.
-    for log in "$BASE_DIR/logs"/*/current; do
+    for log in "$BASE_DIR/internal/logs/pipelines"/*/current; do
         [ -f "$log" ] || continue
         name="$(basename "$(dirname "$log")")"
         tail -f "$log" | decode | awk -v name="$name" '{ print name ": " $0; fflush() }' &

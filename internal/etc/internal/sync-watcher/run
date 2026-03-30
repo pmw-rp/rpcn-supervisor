@@ -1,0 +1,8 @@
+#!/bin/sh
+BASE_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+# Sleep first so the initial sync called by start-all runs before the first
+# watcher cycle, avoiding an immediate double-sync on startup.
+while true; do
+    sleep 5
+    "$BASE_DIR/bin/sync"
+done
